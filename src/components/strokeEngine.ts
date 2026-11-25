@@ -23,30 +23,25 @@ export type EngineOptions = {
 };
 
 /** Reads pen pressure, tilt, azimuth and barrel roll from a pointer event. */
-export function readPointer(e: PointerEvent | undefined, x: number, y: number): BrushInput {
-  const ev = e as (PointerEvent & { altitudeAngle?: number; azimuthAngle?: number }) | undefined;
-  const time = ev?.timeStamp ?? performance.now();
-  if (!ev || ev.pointerType !== "pen") return { x, y, pressure: 1, tilt: 0, azimuth: 0, twist: 0, pen: false, time };
-  const tilt = typeof ev.altitudeAngle === "number"
-    ? clamp(1 - ev.altitudeAngle / (Math.PI / 2))
-    : clamp(Math.max(Math.abs(ev.tiltX || 0), Math.abs(ev.tiltY || 0)) / 90);
-  const azimuth = typeof ev.azimuthAngle === "number" ? ev.azimuthAngle : Math.atan2(ev.tiltY || 0, ev.tiltX || 0);
-  return { x, y, pressure: ev.pressure > 0 ? ev.pressure : 0.5, tilt, azimuth, twist: ((ev.twist || 0) * Math.PI) / 180, pen: true, time };
+export function readPointer(e: PointerEvent, x: number, y: number): BrushInput {
+  const isPen = e.pointerType === "pen";
+  const rawP = typeof e.pressure === "number" && e.pressure > 0 ? e.pressure : isPen ? 0.5 : 1;
+  const tiltX = e.tiltX ?? 0;
+  const tiltY = e.tiltY ?? 0;
+  const radX = (tiltX * Math.PI) / 180;
+  const radY = (tiltY * Math.PI) / 180;
+  const tilt = Math.min(Math.PI / 2, Math.acos(Math.cos(radX) * Math.cos(radY)));
+  let azimuth = Math.atan2(Math.sin(radY), Math.sin(radX));
+  if (azimuth < 0) azimuth += Math.PI * 2;
+  const twist = (((e.twist ?? 0) % 360) * Math.PI) / 180;
+  return { x, y, pressure: rawP, tilt, azimuth, twist, pen: isPen, time: e.timeStamp || performance.now() };
 }
-
-const BLEND: Record<string, [GlobalCompositeOperation, string]> = {
-  Normal: ["source-over", "normal"], Multiply: ["multiply", "multiply"], Subtract: ["source-over", "difference"],
-  Overlay: ["overlay", "overlay"], Screen: ["screen", "screen"], Add: ["lighter", "plus-lighter"],
-  Darken: ["darken", "darken"], Lighten: ["lighten", "lighten"], "Color Burn": ["color-burn", "color-burn"], "Color Dodge": ["color-dodge", "color-dodge"],
-};
-const blendOf = (m: string) => BLEND[m] ?? (["source-over", "normal"] as [GlobalCompositeOperation, string]);
 
 type Box = { x0: number; y0: number; x1: number; y1: number };
 type Pending = { pos: Pt; dir: number; input: BrushInput; distance: number; speed: number };
-type Stroke = {
-  dpr: number; sizeScale: number; lenScale: number; wet: boolean;
-  last: BrushInput; raw: BrushInput; smooth: Pt; filtered: Pt; raws: Pt[];
-  motionHistory: Pt[]; stabBuffer: { x: number; y: number; time: number }[];
+type Active = {
+  id: number; input: BrushInput; last: Pt; smooth: Pt; filtered: Pt; raws: Pt[];
+  lastTime: number; lastDirection: number;
   carry: number; distance: number; speed: number;
   mask: HTMLCanvasElement; maxMode: boolean; uniform: boolean; strength: number; threshold: boolean;
   movingGrain: boolean; grainOffset: Pt; grainPat: CanvasPattern | null; grainLevels: (CanvasPattern | null | undefined)[];
@@ -58,210 +53,179 @@ type Stroke = {
 
 const mixHsl = (a: [number, number, number], b: [number, number, number], k: number): [number, number, number] => {
   const t = clamp(k), dh = ((b[0] - a[0] + 540) % 360) - 180;
-  return [a[0] + dh * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  return [(a[0] + dh * t + 360) % 360, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 };
 
-/** One stroke pipeline shared by the canvas, the Brush Studio drawing pad and brush previews. */
+const BLEND_OPS: Record<string, GlobalCompositeOperation> = {
+  Normal: "source-over", Multiply: "multiply", Screen: "screen", Overlay: "overlay",
+  Darken: "darken", Lighten: "lighten", "Color Dodge": "color-dodge", "Color Burn": "color-burn",
+  "Hard Light": "hard-light", "Soft Light": "soft-light", Difference: "difference", Exclusion: "exclusion",
+  Hue: "hue", Saturation: "saturation", Color: "color", Luminosity: "luminosity",
+  Add: "lighter", Subtract: "source-over", Divide: "source-over", LinearBurn: "source-over",
+};
+
+const BLEND_CSS: Record<string, string> = {
+  Normal: "normal", Multiply: "multiply", Screen: "screen", Overlay: "overlay",
+  Darken: "darken", Lighten: "lighten", "Color Dodge": "color-dodge", "Color Burn": "color-burn",
+  "Hard Light": "hard-light", "Soft Light": "soft-light", Difference: "difference", Exclusion: "exclusion",
+  Hue: "hue", Saturation: "saturation", Color: "color", Luminosity: "luminosity",
+  Add: "plus-lighter", Subtract: "normal", Divide: "normal", LinearBurn: "normal",
+};
+
+/**
+ * Creates a two-layer stroke engine.
+ */
 export function createStrokeEngine(o: EngineOptions) {
-  const lctx = o.layer.getContext("2d")!;
-  const mk = () => document.createElement("canvas");
-  const maskBuf = mk(), acc = mk(), scratch = mk(), gscratch = mk();
-  const mctx = maskBuf.getContext("2d", { willReadFrequently: true })!;
-  const actx = acc.getContext("2d")!;
+  const dst = o.destination;
+  const layer = o.layer;
+  const dctx = dst.getContext("2d")!;
+  const lctx = layer.getContext("2d")!;
+  const cw = dst.width;
+  const ch = dst.height;
+
+  const mcan = document.createElement("canvas");
+  mcan.width = cw; mcan.height = ch;
+  const mctx = mcan.getContext("2d")!;
+
+  const acan = document.createElement("canvas");
+  acan.width = cw; acan.height = ch;
+  const actx = acan.getContext("2d")!;
+
+  const scratch = document.createElement("canvas");
   const xctx = scratch.getContext("2d")!;
-  const gctx = gscratch.getContext("2d")!;
-  let cw = 0, ch = 0, raf = 0;
-  let S: BrushSettings = withDefaults();
-  let src: BrushSources = { shape: null, grain: null };
-  let stroke: Stroke | null = null;
 
-  const n = (id: string) => {
-    const cur = o.settings?.() ?? S;
-    const v = cur[id] ?? S[id];
-    return typeof v === "number" && Number.isFinite(v) ? v : 0;
-  };
-  const on = (id: string) => {
-    const cur = o.settings?.() ?? S;
-    return (cur[id] ?? S[id]) === true;
-  };
-  const str = (id: string) => {
-    const cur = o.settings?.() ?? S;
-    return String(cur[id] ?? S[id] ?? "");
-  };
-  
-  const rand = () => Math.random();
-  const sym = () => Math.random() * 2 - 1;
-  const centered = (v: number, x: number) => (v >= 0 ? 1 - v * (1 - x) : 1 + v * x);
+  let stroke: Active | null = null;
+  let rafId: number | null = null;
+  let seed = 0x1234567;
+  const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+  const sym = () => rand() * 2 - 1;
 
+  const S = () => withDefaults(o.settings ? o.settings() : activeBrush.settings);
+  const n = (k: string) => Number(S()[k] ?? 0);
+  const on = (k: string) => S()[k] === true;
+  const str = (k: string) => String(S()[k] ?? "");
+
+  const mk = () => document.createElement("canvas");
   const ensure = () => {
-    const w = o.layer.width, h = o.layer.height;
-    if (w === cw && h === ch) return;
-    cw = w; ch = h;
-    maskBuf.width = acc.width = w;
-    maskBuf.height = acc.height = h;
+    if (mcan.width !== dst.width || mcan.height !== dst.height) {
+      mcan.width = acan.width = dst.width;
+      mcan.height = acan.height = dst.height;
+    }
+  };
+
+  const grainPx = (baseSize: number, dpr: number) => {
+    const s = S();
+    const sc = n("grainScale") / 100;
+    if (str("grainMode") === "Texturized") return Math.max(0.05, sc * (dpr / 2));
+    const zm = n("grainZoom") / 100;
+    return Math.max(0.05, sc * (1 + (baseSize / (MAX_TIP_PX * dpr) - 1) * zm));
   };
 
   const colorVaries = (wet: boolean) =>
-    ["stampHue", "stampSat", "stampLight", "stampDark", "stampSecondary",
-      "pressColorHue", "pressColorSat", "pressColorBright", "pressColorSecondary",
-      "tiltColorHue", "tiltColorSat", "tiltColorBright", "tiltColorSecondary",
-      "barrelColorHue", "barrelColorSat", "barrelColorBright", "barrelColorSecondary"].some((k) => n(k) !== 0) ||
-    (wet && n("pull") > 0);
+    n("stampHue") > 0 || n("stampSat") > 0 || n("stampLight") > 0 || n("stampDark") > 0 || n("stampSecondary") > 0 ||
+    n("pressureHue") > 0 || n("pressureSat") > 0 || n("pressureLight") > 0 || n("pressureDark") > 0 || n("pressureSecondary") > 0 ||
+    n("tiltHue") > 0 || n("tiltSat") > 0 || n("tiltLight") > 0 || n("tiltDark") > 0 || n("tiltSecondary") > 0 ||
+    n("rollHue") > 0 || n("rollSat") > 0 || n("rollLight") > 0 || n("rollDark") > 0 || n("rollSecondary") > 0 ||
+    (wet && (n("dilution") > 0 || n("attack") > 0));
 
-  /** Canvas pixels per grain pixel, from Scale and Zoom. */
-  const grainPx = (size: number, dpr: number) => {
-    const base = Math.max(0.02, n("grainScale") / 100) * 2;
-    if (str("grainMode") === "Texturized") return base * dpr;
-    const z = clamp(n("grainZoom") / 100);
-    const gw = src.grain?.w ?? 256;
-    return base * dpr * z + (1 - z) * base * size / gw;
-  };
-
-  const getTaperLengths = (s: Stroke, pen: boolean) => {
-    const pre = pen ? "p" : "t";
-    const startPercent = n(`${pre}TaperLength`);
-    const endPercent = on(`${pre}TaperLink`) ? startPercent : (n(`${pre}TaperEndLength`) || startPercent);
-    const maxTaperDistance = 250 * s.dpr * (s.lenScale || 1);
-    const startLen = (startPercent / 100) * maxTaperDistance;
-    const endLen = (endPercent / 100) * maxTaperDistance;
-    return { startLen, endLen, pre };
-  };
-
-  const grow = (s: Stroke, x: number, y: number, r: number) => {
-    for (const key of ["bbox", "all"] as const) {
-      const b = s[key];
-      if (!b) s[key] = { x0: x - r, y0: y - r, x1: x + r, y1: y + r };
-      else { b.x0 = Math.min(b.x0, x - r); b.y0 = Math.min(b.y0, y - r); b.x1 = Math.max(b.x1, x + r); b.y1 = Math.max(b.y1, y + r); }
-    }
-  };
-
-  const flush = () => {
-    raf = 0;
-    const s = stroke;
-    if (!s || !s.bbox) return;
-    const b = s.bbox;
-    s.bbox = null;
-    if (!s.maxMode && !s.grainPat && !s.threshold) return;
-    const x0 = Math.max(0, Math.floor(b.x0)), y0 = Math.max(0, Math.floor(b.y0));
-    const x1 = Math.min(cw, Math.ceil(b.x1)), y1 = Math.min(ch, Math.ceil(b.y1));
-    const w = x1 - x0, h = y1 - y0;
-    if (w <= 0 || h <= 0) return;
-    const thr = s.threshold ? (n("thresholdAmount") / 100) * 255 : -1;
-    if (s.maxMode) {
-      const sd = mctx.getImageData(x0, y0, w, h).data;
-      const out = lctx.createImageData(w, h), od = out.data;
-      const [r, g, bl] = s.rgb;
-      for (let k = 0; k < od.length; k += 4) {
-        const a = sd[k] ?? 0;
-        od[k] = r; od[k + 1] = g; od[k + 2] = bl;
-        od[k + 3] = thr >= 0 ? (a > thr ? 255 : 0) : a;
-      }
-      lctx.putImageData(out, x0, y0);
-    } else {
-      lctx.clearRect(x0, y0, w, h);
-      lctx.drawImage(acc, x0, y0, w, h, x0, y0, w, h);
-    }
-    if (s.grainPat) {
-      lctx.save();
-      lctx.beginPath(); lctx.rect(x0, y0, w, h); lctx.clip();
-      lctx.globalCompositeOperation = "destination-in";
-      lctx.imageSmoothingEnabled = str("grainFiltering") !== "No filtering";
-      lctx.imageSmoothingQuality = str("grainFiltering") === "Classic filtering" ? "medium" : "high";
-      lctx.fillStyle = s.grainPat;
-      lctx.fillRect(x0, y0, w, h);
-      lctx.restore();
-    }
-    if (thr >= 0 && !s.maxMode) {
-      const im = lctx.getImageData(x0, y0, w, h), d = im.data;
-      for (let k = 3; k < d.length; k += 4) d[k] = (d[k] ?? 0) > thr ? 255 : 0;
-      lctx.putImageData(im, x0, y0);
-    }
-  };
-  const schedule = () => { if (!raf) raf = requestAnimationFrame(flush); };
-
-  // Wet mix Pull: pick up colour already on the canvas.
-  const pickUp = (s: Stroke, pos: Pt) => {
-    const dctx = o.destination.getContext("2d");
-    if (!dctx) return;
-    const x = Math.round(clamp(pos.x, 0, cw - 1)), y = Math.round(clamp(pos.y, 0, ch - 1));
-    const px = dctx.getImageData(x, y, 1, 1).data;
-    if ((px[3] ?? 0) === 0) return;
-    const hex = "#" + [px[0] ?? 0, px[1] ?? 0, px[2] ?? 0].map((v) => v.toString(16).padStart(2, "0")).join("");
-    const mix = (n("pull") / 100) * (str("renderingMode") === "Intense Blending" ? 0.6 : 0.35);
-    s.hsl = mixHsl(s.hsl, hexToHsl(hex), mix);
-  };
-
-  const stampColor = (s: Stroke, input: BrushInput, tilt: number, roll: number): string => {
+  const stampColor = (s: Active, input: BrushInput, tilt: number, roll: number) => {
+    const p = input.pressure;
     let [h, sat, l] = s.hsl;
-    h += sym() * (n("stampHue") / 100) * 180;
-    sat += sym() * (n("stampSat") / 100);
-    l += rand() * (n("stampLight") / 100) * 0.5 - rand() * (n("stampDark") / 100) * 0.5;
-    let sec = rand() * (n("stampSecondary") / 100);
-    if (input.pen) {
-      const dyn: [string, number][] = [["pressColor", input.pressure], ["tiltColor", tilt], ["barrelColor", roll]];
-      for (const [pre, v] of dyn) {
-        h += (n(`${pre}Hue`) / 100) * v * 180;
-        sat += (n(`${pre}Sat`) / 100) * v;
-        l += (n(`${pre}Bright`) / 100) * v * 0.5;
-        sec += (n(`${pre}Secondary`) / 100) * v;
+    const dh = sym() * (n("stampHue") / 100) * 180 +
+      (p * 2 - 1) * (n("pressureHue") / 100) * 180 +
+      tilt * (n("tiltHue") / 100) * 180 +
+      (roll / (Math.PI * 2)) * (n("rollHue") / 100) * 180;
+    const ds = sym() * (n("stampSat") / 100) +
+      (p * 2 - 1) * (n("pressureSat") / 100) +
+      tilt * (n("tiltSat") / 100) +
+      (roll / (Math.PI * 2)) * (n("rollSat") / 100);
+    const dl = (rand() * (n("stampLight") / 100) - rand() * (n("stampDark") / 100)) * 0.5 +
+      (p * 2 - 1) * ((n("pressureLight") - n("pressureDark")) / 200) +
+      tilt * ((n("tiltLight") - n("tiltDark")) / 200) +
+      (roll / (Math.PI * 2)) * ((n("rollLight") - n("rollDark")) / 200);
+    let cur: [number, number, number] = [(h + dh + 360) % 360, clamp(sat + ds), clamp(l + dl)];
+    const secK = clamp(
+      rand() * (n("stampSecondary") / 100) +
+      p * (n("pressureSecondary") / 100) +
+      tilt * (n("tiltSecondary") / 100) +
+      (roll / (Math.PI * 2)) * (n("rollSecondary") / 100)
+    );
+    if (secK > 0) cur = mixHsl(cur, s.secondary, secK);
+    const rgb = hslToRgb(...cur);
+    return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+  };
+
+  /** Tints mask into dst canvas keeping original white core pixels pure white. */
+  const tintMask = (targetCanvas: HTMLCanvasElement, maskCanvas: HTMLCanvasElement, rgbColor: [number, number, number]) => {
+    const res = maskCanvas.width;
+    targetCanvas.width = targetCanvas.height = res;
+    const tx = targetCanvas.getContext("2d")!;
+    tx.clearRect(0, 0, res, res);
+    tx.drawImage(maskCanvas, 0, 0);
+
+    const imgData = tx.getImageData(0, 0, res, res);
+    const data = imgData.data;
+
+    let hasWhiteCore = false;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3]! > 30 && (data[i]! > 60 || data[i + 1]! > 60 || data[i + 2]! > 60)) {
+        hasWhiteCore = true;
+        break;
       }
     }
-    const [r, g, b] = hslToRgb(...mixHsl([h, sat, l], s.secondary, sec));
-    return `rgb(${r},${g},${b})`;
-  };
 
-  /** Moving grain: grain pressed into each stamp, sliding with the stroke by Movement. */
-  const movingMask = (s: Stroke, pos: Pt, dir: number, ang: number, sx: number, sy: number, sz: number, projSize: number, bleed: number) => {
-    const res = s.mask.width;
-    if (gscratch.width !== res) gscratch.width = gscratch.height = res;
-    gctx.globalCompositeOperation = "source-over";
-    gctx.globalAlpha = 1;
-    gctx.clearRect(0, 0, res, res);
-    gctx.drawImage(s.mask, 0, 0);
-    const jitter = o.fast ? 0 : rand() * n("grainDepthJitter");
-    const depth = clamp(Math.max(n("grainDepthMin"), n("grainDepth") - jitter) / 100 + bleed);
-    const lv = Math.round(depth * 10);
-    if (lv <= 0) return gscratch;
-    let pat = s.grainLevels[lv];
-    if (pat === undefined) {
-      const gc = buildGrainCanvas(S, lv / 10, src.grain);
-      pat = gc ? gctx.createPattern(gc, "repeat") : null;
-      s.grainLevels[lv] = pat;
+    if (hasWhiteCore) {
+      for (let i = 0; i < data.length; i += 4) {
+        const a = data[i + 3]!;
+        if (a === 0) continue;
+        const lum = (data[i]! + data[i + 1]! + data[i + 2]!) / 765;
+        data[i] = Math.round(rgbColor[0] * (1 - lum) + 255 * lum);
+        data[i + 1] = Math.round(rgbColor[1] * (1 - lum) + 255 * lum);
+        data[i + 2] = Math.round(rgbColor[2] * (1 - lum) + 255 * lum);
+      }
+      tx.putImageData(imgData, 0, 0);
+    } else {
+      tx.globalCompositeOperation = "source-in";
+      tx.fillStyle = `rgb(${rgbColor[0]},${rgbColor[1]},${rgbColor[2]})`;
+      tx.fillRect(0, 0, res, res);
     }
-    if (!pat) return gscratch;
-    const m = clamp(n("grainMovement") / 100);
-    const theta = dir * (n("grainRotation") / 100) * 180 / Math.PI;
-    pat.setTransform(new DOMMatrix()
-      .translate(res / 2, res / 2).scale(1 / sx, 1 / sy).rotate((-ang * 180) / Math.PI).scale(res / Math.max(0.1, sz))
-      .translate(-pos.x * (1 - m), -pos.y * (1 - m)).rotate(theta).scale(grainPx(projSize, s.dpr))
-      .translate(-s.grainOffset.x, -s.grainOffset.y));
-    gctx.imageSmoothingEnabled = str("grainFiltering") !== "No filtering";
-    gctx.globalCompositeOperation = "destination-in";
-    gctx.fillStyle = pat;
-    gctx.fillRect(0, 0, res, res);
-    gctx.globalCompositeOperation = "source-over";
-    return gscratch;
   };
 
-  const drawStamp = (s: Stroke, pos: Pt, angle: number, size: number, sx: number, sy: number, alpha: number, color: string | null, base: HTMLCanvasElement) => {
-    if (size <= 0.3 || alpha <= 0.002) return;
-    const res = s.mask.width;
-    let img: HTMLCanvasElement;
-    let ga = clamp(alpha);
-    if (s.uniform) ga = Math.sqrt(ga);
+  const movingMask = (
+    s: Active, at: Pt, dir: number, ang: number, sx: number, sy: number, sz: number,
+    projSize: number, bleed: number
+  ) => {
+    const src = o.sources ? o.sources() : { shape: activeBrush.shape, grain: activeBrush.grain };
+    const depth = clamp(
+      Math.max(n("grainDepthMin"), n("grainDepth") - rand() * n("grainDepthJitter")) / 100 - bleed
+    );
+    const rot = (n("grainRotation") / 100) * Math.PI + (on("followStroke") ? dir : 0);
+    const cos = Math.cos(rot), sin = Math.sin(rot);
+    const gk = (projSize / Math.max(1, sz)) / grainPx(s.baseSize, o.pixelRatio());
+    const offset = {
+      x: ((at.x - cw / 2) * cos + (at.y - ch / 2) * sin) * gk + s.grainOffset.x,
+      y: (-(at.x - cw / 2) * sin + (at.y - ch / 2) * cos) * gk + s.grainOffset.y,
+    };
+    return buildMask(s.mask.width, S(), depth, offset, true, src);
+  };
+
+  const drawStamp = (
+    s: Active, at: Pt, ang: number, sz: number, sx: number, sy: number, a: number,
+    color: string | null, base: HTMLCanvasElement
+  ) => {
+    const res = base.width;
+    const rad = (sz * Math.max(Math.abs(sx), Math.abs(sy))) / 2;
+    const bx0 = Math.floor(at.x - rad);
+    const by0 = Math.floor(at.y - rad);
+    const bx1 = Math.ceil(at.x + rad);
+    const by1 = Math.ceil(at.y + rad);
+    if (bx1 < 0 || by1 < 0 || bx0 >= cw || by0 >= ch) return;
+
+    let img: CanvasImageSource = base;
+    let ga = a;
+
     if (s.maxMode) {
-      if (base === s.mask) {
-        const lv = Math.max(1, Math.round(ga * 64));
-        let c = s.levels[lv];
-        if (!c) {
-          c = mk(); c.width = c.height = res;
-          const x = c.getContext("2d")!;
-          x.fillStyle = "#000"; x.fillRect(0, 0, res, res);
-          x.globalAlpha = lv / 64; x.drawImage(s.mask, 0, 0);
-          s.levels[lv] = c;
-        }
-        img = c;
-      } else {
+      if (color) {
         if (scratch.width !== res) scratch.width = scratch.height = res;
         xctx.globalCompositeOperation = "source-over";
         xctx.globalAlpha = 1; xctx.fillStyle = "#000"; xctx.fillRect(0, 0, res, res);
@@ -276,197 +240,152 @@ export function createStrokeEngine(o: EngineOptions) {
       xctx.globalCompositeOperation = "source-over";
       xctx.globalAlpha = 1;
       xctx.clearRect(0, 0, res, res);
-      xctx.drawImage(base, 0, 0);
-      xctx.globalCompositeOperation = "source-in";
-      xctx.fillStyle = color ?? s.rgbStr;
-      xctx.fillRect(0, 0, res, res);
-      xctx.globalCompositeOperation = "source-over";
+
+      const parsedRgb = color
+        ? (color.match(/\d+/g)?.map(Number) as [number, number, number] | undefined) ?? s.rgb
+        : s.rgb;
+      tintMask(scratch, base, parsedRgb);
       img = scratch;
     }
-    const target = s.maxMode ? mctx : s.grainPat || s.threshold ? actx : lctx;
-    target.save();
-    target.imageSmoothingEnabled = str("shapeFiltering") !== "No filtering";
-    target.imageSmoothingQuality = str("shapeFiltering") === "Classic filtering" ? "medium" : "high";
-    const normal: GlobalCompositeOperation = s.maxMode ? "lighten" : "source-over";
-    target.globalCompositeOperation = normal;
-    target.globalAlpha = ga;
-    target.translate(pos.x, pos.y);
-    target.rotate(angle);
-    target.scale(sx, sy);
-    const blur = size * ((n("wetEdges") * 0.08 + (s.wet ? n("blur") * 0.12 + rand() * n("blurJitter") * 0.08 : 0)) / 100);
-    target.filter = blur > 0 ? `blur(${blur}px)` : "none";
-    const burnt = n("burntEdges") / 100;
-    if (burnt > 0) {
-      target.globalCompositeOperation = s.maxMode ? "lighten" : blendOf(str("burntMode"))[0];
-      target.shadowColor = `rgba(0,0,0,${burnt * 0.65})`;
-      target.shadowBlur = size * burnt * 0.05;
-      target.drawImage(img, -size / 2, -size / 2, size, size);
-      target.globalCompositeOperation = normal;
-      target.shadowColor = "transparent";
-      target.shadowBlur = 0;
-    }
-    target.drawImage(img, -size / 2, -size / 2, size, size);
-    target.restore();
-    grow(s, pos.x, pos.y, size * 0.75 + 2 + blur * 2);
+
+    const ctx = s.maxMode ? mctx : lctx;
+    ctx.save();
+    ctx.translate(at.x, at.y);
+    ctx.rotate(ang);
+    ctx.scale((sz * sx) / res, (sz * sy) / res);
+    ctx.globalAlpha = ga;
+    ctx.globalCompositeOperation = s.maxMode ? "lighter" : "source-over";
+    ctx.drawImage(img, -res / 2, -res / 2);
+    ctx.restore();
+
+    const box: Box = { x0: Math.max(0, bx0), y0: Math.max(0, by0), x1: Math.min(cw, bx1), y1: Math.min(ch, by1) };
+    s.bbox = s.bbox ? {
+      x0: Math.min(s.bbox.x0, box.x0), y0: Math.min(s.bbox.y0, box.y0),
+      x1: Math.max(s.bbox.x1, box.x1), y1: Math.max(s.bbox.y1, box.y1),
+    } : box;
   };
 
-  // Places one step of stamps using every per-stamp setting.
-  const emit = (s: Stroke, pd: Pending, total: number | null) => {
-    const { pos, dir, input } = pd;
-    const pen = input.pen, p = pen ? input.pressure : 1, dpr = s.dpr;
-    const alt = (1 - input.tilt) * 90, ta = n("tiltAngle") || 90;
-    const tilt = pen && alt <= ta ? clamp((ta - alt) / Math.max(1, ta)) : 0;
-    const roll = pen ? (((input.twist / (Math.PI * 2)) % 1) + 1) % 1 : 0;
-    let size = s.baseSize;
-    let alpha = (n("flow") / 100) * s.strength;
-    let bleed = 0;
-    if (pen) {
-      size *= Math.max(0.02, centered(n("pencilPressureSize") / 100, p));
-      alpha *= 1 - (n("pencilPressureOpacity") / 100) * (1 - p);
-      alpha *= Math.max(0, centered(n("pencilPressureFlow") / 100, p));
-      bleed += (n("pencilPressureBleed") / 100) * (1 - p);
-      alpha *= 1 - (n("tiltOpacity") / 100) * tilt;
-      alpha *= 1 - (n("tiltGradation") / 100) * tilt * 0.5;
-      bleed += (n("tiltBleed") / 100) * tilt;
-      size *= Math.max(0.05, 1 + (n("barrelSize") / 100) * (roll - 0.5) * 2);
-      alpha *= 1 - (n("barrelOpacity") / 100) * roll;
-      bleed += (n("barrelBleed") / 100) * roll;
-    }
-    size = Math.max((MAX_TIP_PX * dpr * s.sizeScale * n("minSize")) / 100, size);
-    const untilted = size;
-    if (pen) size *= 1 + (n("tiltSize") / 100) * tilt * 2;
-    const sp = Math.min(1, pd.speed / (3 * dpr));
-    size *= Math.max(0.05, 1 + (n("speedSize") / 100) * sp);
-    alpha *= clamp(1 + (n("speedOpacity") / 100) * sp);
-    // Taper: purely modulating stamp radius and alpha, zero destructive erasing
-    const { startLen, endLen, pre } = getTaperLengths(s, pen);
-    const d = pd.distance;
+  const scheduleFlush = () => {
+    if (rafId !== null) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      if (!stroke) return;
+      renderPending(stroke);
+      commitBbox(stroke);
+    });
+  };
 
-    let tStart = 1.0;
-    if (startLen > 0 && d < startLen) {
-      tStart = Math.max(0, Math.min(1, d / startLen));
-    }
+  const commitBbox = (s: Active) => {
+    if (!s.bbox) return;
+    const b = s.bbox;
+    s.bbox = null;
+    const bw = b.x1 - b.x0, bh = b.y1 - b.y0;
+    if (bw <= 0 || bh <= 0) return;
+    s.all = s.all ? {
+      x0: Math.min(s.all.x0, b.x0), y0: Math.min(s.all.y0, b.y0),
+      x1: Math.max(s.all.x1, b.x1), y1: Math.max(s.all.y1, b.y1),
+    } : { ...b };
+  };
 
-    let tEnd = 1.0;
-    if (total !== null && endLen > 0) {
-      const distFromEnd = Math.max(0, total - d);
-      if (distFromEnd < endLen) {
-        let rawTEnd = Math.max(0, Math.min(1, distFromEnd / endLen));
-        if (pen) {
-          const pressureTaper = n("pTaperPressure") / 100;
-          if (pressureTaper > 0) {
-            rawTEnd *= (1 - pressureTaper * (1 - Math.max(0, Math.min(1, p))));
-          }
-        }
-        tEnd = rawTEnd;
+  const renderPending = (s: Active) => {
+    const list = s.stamps;
+    s.stamps = [];
+    if (!list.length) return;
+
+    const round = Math.max(0.01, 1 - n("roundness") / 100);
+    const mode = str("renderingMode");
+    const dpr = o.pixelRatio();
+    const count = Math.max(1, Math.round(n("count") + sym() * (n("countJitter") / 100) * n("count")));
+
+    for (let li = 0; li < list.length; li++) {
+      const p = list[li]!;
+      const at = p.pos;
+      const input = p.input;
+      const dir = p.dir;
+
+      const tilt = clamp((input.tilt - (n("tiltAngle") / 180) * (Math.PI / 2)) / (Math.PI / 2));
+      const roll = input.twist;
+      const pLinear = input.pressure;
+      const spd = clamp(p.speed / (1500 * dpr));
+
+      let size = s.baseSize;
+      size *= (1 + (pLinear * 2 - 1) * (n("pencilPressureSize") / 100));
+      const untilted = size;
+      if (tilt > 0) size *= (1 + tilt * (n("tiltSize") / 100));
+      if (roll !== 0) size *= (1 + (roll / (Math.PI * 2)) * (n("barrelSize") / 100));
+      size *= (1 + (spd * 2 - 1) * (n("speedSize") / 100));
+
+      let alpha = 1;
+      alpha *= (1 - (1 - pLinear) * (n("pencilPressureOpacity") / 100));
+      if (tilt > 0) alpha *= (1 - tilt * (n("tiltOpacity") / 100));
+      if (roll !== 0) alpha *= (1 - (roll / (Math.PI * 2)) * (n("barrelOpacity") / 100));
+      alpha *= (1 + (spd * 2 - 1) * (n("speedOpacity") / 100));
+      alpha = clamp(alpha);
+
+      let angle = s.baseAngle;
+      if (on("orientToScreen") && o.viewRotation) angle += o.viewRotation();
+      if (on("azimuth")) angle += input.azimuth;
+      if (on("followStroke")) angle += dir;
+
+      const bleed = (pLinear * n("pencilPressureBleed") + tilt * n("tiltBleed") + (roll / (Math.PI * 2)) * n("barrelBleed")) / 100;
+
+      for (let ci = 0; ci < count; ci++) {
+        const sz = size * (1 - rand() * (n("jitterSize") / 100));
+        const a = alpha * (1 - rand() * (n("jitterOpacity") / 100));
+        const sx = (on("flipX") && rand() < 0.5 ? -1 : 1) * Math.max(0.05, 1 - rand() * (n("roundHJitter") / 100));
+        const sy = (on("flipY") && rand() < 0.5 ? -1 : 1) * Math.max(0.05, round * (1 - rand() * (n("roundVJitter") / 100)));
+        const ang = angle + sym() * (n("scatter") / 100) * Math.PI;
+        const color = s.maxMode || s.tinted ? null : stampColor(s, input, tilt, roll);
+        const projSize = (on("tiltSizeCompression") ? untilted : size) * (size > 0 ? sz / size : 1);
+        const base = s.movingGrain ? movingMask(s, at, dir, ang, sx, sy, sz, projSize, bleed) : s.mask;
+        drawStamp(s, at, ang, sz, sx, sy, a, color, base);
       }
     }
-
-    const t = Math.min(tStart, tEnd);
-    if (t < 1.0) {
-      const isClassic = on("classicTaper");
-      const tipSlider = n(`${pre}TaperTip`);
-      const sharpness = 0.25 + (tipSlider / 100) * 1.75;
-      const easedT = isClassic ? t : Math.max(0, Math.min(1, 1 - Math.pow(1 - t, sharpness)));
-
-      const sizeSlider = n(`${pre}TaperSize`);
-      const minScale = 1 - (sizeSlider / 100);
-      const sizeMult = minScale + (1 - minScale) * easedT;
-
-      const opacitySlider = n(`${pre}TaperOpacity`);
-      const minAlpha = 1 - (opacitySlider / 100);
-      const opacityMult = minAlpha + (1 - minAlpha) * easedT;
-
-      size *= Math.max(0, sizeMult);
-      alpha *= Math.max(0, opacityMult);
-    }
-
-    const fallOffVal = n("fallOff");
-    if (fallOffVal > 0) {
-      const maxDistanceThreshold = Math.max(
-        10 * dpr,
-        (Math.pow((100 - Math.min(99.9, fallOffVal)) / 100, 2) * 5000 + size * 2) * (s.lenScale || 1)
-      );
-      alpha *= Math.max(0, 1 - d / maxDistanceThreshold);
-    }
-    if (s.wet) {
-      alpha *= 1 - (n("dilution") / 100) * 0.8;
-      const c = n("charge");
-      if (c < 100) alpha *= Math.max(0, 1 - d / (((c / 100) ** 2 * 3000 + 50) * dpr * s.lenScale));
-      alpha *= 0.15 + 0.85 * (n("attack") / 100);
-      const g = n("grade") / 100;
-      if (g !== 0) alpha = Math.pow(clamp(alpha), Math.pow(2, -g * 1.5));
-    }
-    if (!s.movingGrain) alpha *= 1 - Math.min(1, bleed) * 0.6;
-
-    const follow = on("relativeToStroke") ? 1 : n("rotation") / 100;
-    let angle = s.baseAngle + dir * follow + (on("relativeToStroke") ? (n("rotation") / 100) * Math.PI : 0);
-    if (pen && str("inputStyle") !== "Touch only") angle += input.azimuth;
-    if (pen && str("inputStyle") === "Azimuth and barrel roll") angle += input.twist;
-    if (on("orientToScreen")) angle -= o.viewRotation?.() ?? 0;
-    let round = n("roundness") / 100;
-    round *= Math.max(0.05, centered(n("pressureRoundness") / 100, p));
-    round *= Math.max(0.05, centered(n("tiltRoundness") / 100, tilt));
-
-    const count = Math.max(1, Math.round(n("count") * (1 - rand() * (n("countJitter") / 100))));
-    const tx = Math.cos(dir);
-    const ty = Math.sin(dir);
-    const nx = -ty;
-    const ny = tx;
-
-    const pencilModifier = pen
-      ? Math.max(0.1, 1 + (n("pencilPressureSize") / 100) * (p - 0.5) + (n("tiltSize") / 100) * tilt + (n("barrelSize") / 100) * (roll - 0.5))
-      : 1;
-
-    const maxLateralOffset = size * (n("jitterLateral") / 100) * pencilModifier;
-    const maxLinearOffset = size * (n("jitterLinear") / 100) * pencilModifier;
-
-    for (let c = 0; c < count; c++) {
-      const lat = (Math.random() * 2 - 1) * maxLateralOffset;
-      const lin = (Math.random() * 2 - 1) * maxLinearOffset;
-      const at = { x: pos.x + nx * lat + tx * lin, y: pos.y + ny * lat + ty * lin };
-
-      const sz = size * (1 - rand() * (n("jitterSize") / 100));
-      const a = alpha * (1 - rand() * (n("jitterOpacity") / 100)) * (1 - (s.wet ? rand() * (n("wetnessJitter") / 100) : 0));
-      const sx = (on("flipX") && rand() < 0.5 ? -1 : 1) * Math.max(0.05, 1 - rand() * (n("roundHJitter") / 100));
-      const sy = (on("flipY") && rand() < 0.5 ? -1 : 1) * Math.max(0.05, round * (1 - rand() * (n("roundVJitter") / 100)));
-      const ang = angle + sym() * (n("scatter") / 100) * Math.PI;
-      const color = s.maxMode || s.tinted ? null : stampColor(s, input, tilt, roll);
-      const projSize = (on("tiltSizeCompression") ? untilted : size) * (size > 0 ? sz / size : 1);
-      const base = s.movingGrain ? movingMask(s, at, dir, ang, sx, sy, sz, projSize, bleed) : s.mask;
-      drawStamp(s, at, ang, sz, sx, sy, a, color, base);
-    }
   };
 
-  const redrawStroke = (s: Stroke, totalLen: number | null) => {
-    lctx.clearRect(0, 0, cw, ch);
-    if (actx) actx.clearRect(0, 0, cw, ch);
-    if (mctx) mctx.clearRect(0, 0, cw, ch);
-    s.bbox = null;
-    s.all = null;
-    for (let i = 0; i < s.stamps.length; i++) {
-      emit(s, s.stamps[i]!, totalLen);
-    }
+  const emit = (c: Pt, dir: number, input: BrushInput, dist = 0, speed = 0) => {
+    if (!stroke) return;
+    stroke.stamps.push({ pos: c, dir, input, distance: dist, speed });
+    stroke.distance += dist;
+    scheduleFlush();
   };
 
-  const release = (s: Stroke) => {
-    // Draw only new stamps each frame; the full taper redraw happens once on lift.
-    while (s.pending.length) {
-      const pd = s.pending.shift()!;
-      s.stamps.push(pd);
-      emit(s, pd, null);
+  const advanceTo = (to: Pt, input: BrushInput, now: number) => {
+    if (!stroke) return;
+    const s = stroke;
+    const dt = Math.max(1, now - s.lastTime);
+    s.lastTime = now;
+    const dpr = o.pixelRatio();
+    const streamline = clamp(n("streamline") / 100);
+    const k = Math.min(1, Math.max(0.05, 1 - streamline * 0.9));
+    const smooth: Pt = { x: s.smooth.x + (to.x - s.smooth.x) * k, y: s.smooth.y + (to.y - s.smooth.y) * k };
+    s.smooth = smooth;
+
+    const from = s.last;
+    const dx = smooth.x - from.x, dy = smooth.y - from.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 0.5) return;
+
+    const speed = (d / dt) * 1000;
+    s.speed = s.speed * 0.7 + speed * 0.3;
+    const dir = Math.atan2(dy, dx);
+    s.lastDirection = dir;
+
+    const step = Math.max(1, (s.baseSize * Math.max(1, n("spacing"))) / 100);
+    let dist = s.carry;
+    while (dist + step <= d) {
+      dist += step;
+      const t = dist / d;
+      emit({ x: from.x + dx * t, y: from.y + dy * t }, dir, input, step, s.speed);
     }
+    s.carry = dist - d;
+    s.last = smooth;
   };
 
-  const begin = (raw: BrushInput) => {
-    if (stroke) cancel();
-    S = withDefaults(o.settings ? o.settings() : activeBrush.settings);
-    src = o.sources ? o.sources() : { shape: activeBrush.shape, grain: activeBrush.grain };
+  const begin = (input: BrushInput) => {
     ensure();
     const dpr = o.pixelRatio();
     const sizeScale = o.sizeScale?.() ?? 1;
-    const wet = o.wetMix ?? (S["wetMix"] !== false);
-    const input = { ...raw, pressure: raw.pen ? pressureResponse(S, raw.pressure) : 1 };
     const minS = n("minSize"), maxS = Math.max(minS, n("maxSize"));
     const pct = minS + (maxS - minS) * ((o.size?.() ?? n("brushSize")) / 100);
     const baseSize = Math.max(1, (MAX_TIP_PX * dpr * sizeScale * pct) / 100);
@@ -481,34 +400,39 @@ export function createStrokeEngine(o: EngineOptions) {
     const rgb = hslToRgb(...hsl);
     const rgbStr = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
     const mode = str("renderingMode");
-    const vary = colorVaries(wet);
+    const vary = colorVaries(false);
     const maxMode = (mode === "Light Glaze" || mode === "Uniformed Glaze") && !vary && !on("classicNormal");
     const strength = mode === "Intense Glaze" ? 1.25 : mode === "Heavy Glaze" ? 1.5 : mode === "Intense Blending" ? 1.2 : 1;
     const texturized = str("grainMode") === "Texturized";
+    const src = o.sources ? o.sources() : { shape: activeBrush.shape, grain: activeBrush.grain };
     const hasGrain = !!src.grain;
     const depth = clamp(Math.max(n("grainDepthMin"), n("grainDepth") - rand() * n("grainDepthJitter")) / 100);
     const grainOffset = on("grainOffsetJitter") ? { x: rand() * 2048, y: rand() * 2048 } : { x: 0, y: 0 };
     const res = Math.max(24, Math.min(256, Math.round(baseSize)));
-    const mask = buildMask(res, S, 0, { x: 0, y: 0 }, false, src);
+    const mask = buildMask(res, S(), 0, { x: 0, y: 0 }, false, src);
+
     let grainPat: CanvasPattern | null = null;
     if (hasGrain && texturized && depth > 0) {
-      const gc = buildGrainCanvas(S, depth, src.grain);
+      const gc = buildGrainCanvas(S(), depth, src.grain);
       if (gc) {
         grainPat = lctx.createPattern(gc, "repeat");
-        grainPat?.setTransform(new DOMMatrix().rotate((n("grainRotation") / 100) * 180).scale(grainPx(baseSize, dpr)).translate(-grainOffset.x, -grainOffset.y));
+        grainPat?.setTransform(
+          new DOMMatrix()
+            .rotate((n("grainRotation") / 100) * 180)
+            .scale(grainPx(baseSize, dpr))
+            .translate(-grainOffset.x, -grainOffset.y)
+        );
       }
     }
     const movingGrain = hasGrain && !texturized &&
       (n("grainDepth") > 0 || n("pencilPressureBleed") > 0 || n("tiltBleed") > 0 || n("barrelBleed") > 0);
+
     let tinted: HTMLCanvasElement | null = null;
     if (!maxMode && !vary) {
-      tinted = mk(); tinted.width = tinted.height = res;
-      const tx = tinted.getContext("2d")!;
-      tx.drawImage(mask, 0, 0);
-      tx.globalCompositeOperation = "source-in";
-      tx.fillStyle = rgbStr;
-      tx.fillRect(0, 0, res, res);
+      tinted = mk();
+      tintMask(tinted, mask, rgb);
     }
+
     const minO = n("minOpacity"), maxO = Math.max(minO, n("maxOpacity"));
     const opacity = (minO + (maxO - minO) * ((o.opacity?.() ?? n("brushOpacity")) / 100)) / 100;
     lctx.clearRect(0, 0, cw, ch);
@@ -518,13 +442,13 @@ export function createStrokeEngine(o: EngineOptions) {
       mctx.fillStyle = "#000";
       mctx.fillRect(0, 0, cw, ch);
     }
-    o.layer.style.opacity = String(opacity);
-    o.layer.style.mixBlendMode = on("luminanceBlending") ? "luminosity" : blendOf(str("blendMode"))[1];
+    layer.style.opacity = String(opacity);
+    layer.style.mixBlendMode = on("luminanceBlending") ? "luminosity" : (BLEND_CSS[str("blendMode")] ?? "normal");
+
     const c = { x: input.x, y: input.y };
     stroke = {
-      dpr, sizeScale, lenScale: sizeScale, wet,
-      last: input, raw, smooth: c, filtered: c, raws: [c],
-      motionHistory: [c], stabBuffer: [{ x: c.x, y: c.y, time: input.time }],
+      id: 1, input, last: c, smooth: c, filtered: c, raws: [c],
+      lastTime: input.time, lastDirection: 0,
       carry: 0, distance: 0, speed: 0,
       mask, maxMode, uniform: mode === "Uniformed Glaze" || mode === "Uniform Blending", strength, threshold: on("alphaThreshold"),
       movingGrain, grainOffset, grainPat, grainLevels: [],
@@ -535,220 +459,102 @@ export function createStrokeEngine(o: EngineOptions) {
       stamps: [{ pos: c, dir: 0, input, distance: 0, speed: 0 }],
     };
 
-
-    release(stroke);
-    schedule();
+    emit(c, 0, input);
   };
 
-  const move = (raw: BrushInput, catchUp = false) => {
-    const s = stroke;
-    if (!s) return;
-    if (!catchUp) s.raw = raw;
-
-    // Filter 1: StreamLine Pressure (exponential smoothing)
-    const pr = raw.pen ? pressureResponse(S, raw.pressure) : 1;
-    const spVal = n("streamlinePressure") / 100;
-    const pressureAlpha = spVal <= 0 ? 1 : Math.max(0.05, 1 - spVal * 0.95);
-    const input = { ...raw, pressure: s.last.pressure + (pr - s.last.pressure) * pressureAlpha };
-
-    let c: Pt = { x: raw.x, y: raw.y };
-    if (!catchUp) {
-      let pt: Pt = { x: raw.x, y: raw.y };
-
-      // Filter 2: Motion Filtering (outlier / wobble rejection) & Expression
-      const mfVal = n("motionFiltering") / 100;
-      if (mfVal > 0) {
-        s.motionHistory.push(pt);
-        if (s.motionHistory.length >= 3) {
-          const p0 = s.motionHistory[s.motionHistory.length - 3]!;
-          const p1 = s.motionHistory[s.motionHistory.length - 2]!;
-          const p2 = s.motionHistory[s.motionHistory.length - 1]!;
-          const cx = p2.x - p0.x;
-          const cy = p2.y - p0.y;
-          const chordLen = Math.hypot(cx, cy);
-          if (chordLen > 1e-4) {
-            const dev = Math.abs((p1.x - p0.x) * cy - (p1.y - p0.y) * cx) / chordLen;
-            const threshold = mfVal * 25 * s.dpr;
-            if (dev < threshold) {
-              const tProj = Math.max(0, Math.min(1, ((p1.x - p0.x) * cx + (p1.y - p0.y) * cy) / (chordLen * chordLen)));
-              const projX = p0.x + cx * tProj;
-              const projY = p0.y + cy * tProj;
-              const exprVal = n("motionExpression") / 100;
-              const effectiveExpression = exprVal * (1 - mfVal * 0.75);
-              pt = {
-                x: projX + (p1.x - projX) * effectiveExpression,
-                y: projY + (p1.y - projY) * effectiveExpression,
-              };
-              s.motionHistory[s.motionHistory.length - 2] = pt;
-            }
-          }
-        }
-        if (s.motionHistory.length > 6) s.motionHistory.shift();
-      } else {
-        s.motionHistory = [pt];
-      }
-
-      // Filter 3: Stabilization (speed-dependent weighted moving average)
-      const stabVal = n("stabilization") / 100;
-      let stabPt = pt;
-      if (stabVal > 0) {
-        const lastSamp = s.stabBuffer[s.stabBuffer.length - 1];
-        const dtSamp = Math.max(1, raw.time - (lastSamp ? lastSamp.time : raw.time - 16));
-        const dSamp = lastSamp ? Math.hypot(pt.x - lastSamp.x, pt.y - lastSamp.y) : 0;
-        const velocity = dSamp / dtSamp;
-        const baseWindow = 1 + stabVal * 15;
-        const velocityFactor = 1 + Math.min(2.5, velocity * 0.8);
-        const windowSize = Math.max(1, Math.round(baseWindow * velocityFactor));
-
-        s.stabBuffer.push({ x: pt.x, y: pt.y, time: raw.time });
-        while (s.stabBuffer.length > windowSize) s.stabBuffer.shift();
-
-        let totalWeight = 0;
-        let sumX = 0;
-        let sumY = 0;
-        for (let i = 0; i < s.stabBuffer.length; i++) {
-          const w = i + 1;
-          sumX += s.stabBuffer[i]!.x * w;
-          sumY += s.stabBuffer[i]!.y * w;
-          totalWeight += w;
-        }
-        stabPt = { x: sumX / totalWeight, y: sumY / totalWeight };
-      } else {
-        s.stabBuffer = [{ x: pt.x, y: pt.y, time: raw.time }];
-      }
-
-      // Filter 4: StreamLine Amount (elastic pull-string lag filter)
-      const slAmount = n("streamline") / 100;
-      const alpha = slAmount <= 0 ? 1 : Math.max(0.05, 1 - slAmount * 0.95);
-      c = {
-        x: s.smooth.x + (stabPt.x - s.smooth.x) * alpha,
-        y: s.smooth.y + (stabPt.y - s.smooth.y) * alpha,
-      };
-    } else {
-      c = { x: raw.x, y: raw.y };
-    }
-
-    const dt = Math.max(1, raw.time - s.last.time);
-    const dx = c.x - s.last.x, dy = c.y - s.last.y, dist = Math.hypot(dx, dy);
-    s.speed = s.speed * 0.7 + Math.min(10 * s.dpr, dist / dt) * 0.3;
-    const dir = Math.atan2(dy, dx);
-    const sp = Math.min(1, s.speed / (3 * s.dpr));
-    if (s.wet && n("pull") > 0) pickUp(s, c);
-    const brushDiameter = s.baseSize * (input.pen ? Math.max(0.05, centered(n("pencilPressureSize") / 100, input.pressure)) : 1);
-    const spacingVal = n("spacing");
-    const spacingJitterVal = n("spacingJitter");
-    const speedFactor = 1 + (n("speedSpacing") / 100) * sp * 2;
-    const baseStep = Math.max(0.5, brushDiameter * (spacingVal / 100) * speedFactor);
-
-    const spacingJitterFactor = spacingJitterVal / 100;
-    const effectiveBase = spacingJitterFactor > 0 ? Math.max(1.5, baseStep) : baseStep;
-    const pressureMod = input.pen ? (0.3 + 0.7 * input.pressure) : 1;
-
-    const nextStep = () => {
-      if (spacingJitterFactor <= 0) return baseStep;
-      return Math.max(0.5, effectiveBase * (1 + Math.random() * spacingJitterFactor * 4 * pressureMod));
-    };
-
-    const start = s.distance;
-    let t = nextStep() - s.carry, lastT = -1, guard = 0;
-    while (t <= dist && guard++ < 4000) {
-      const k = dist > 0 ? t / dist : 1;
-      s.pending.push({
-        pos: { x: s.last.x + dx * k, y: s.last.y + dy * k }, dir,
-        input: { ...input, pressure: s.last.pressure + (input.pressure - s.last.pressure) * k },
-        distance: start + t, speed: s.speed,
-      });
-      lastT = t;
-      t += nextStep();
-    }
-    s.carry = lastT >= 0 ? dist - lastT : s.carry + dist;
-    s.distance = start + dist;
-    s.last = { ...input, x: c.x, y: c.y };
-    s.smooth = c;
-    release(s);
-    schedule();
+  const move = (input: BrushInput) => {
+    if (!stroke) return;
+    advanceTo({ x: input.x, y: input.y }, input, input.time);
   };
 
   const end = () => {
+    if (!stroke) return;
+    renderPending(stroke);
+    commitBbox(stroke);
     const s = stroke;
-    if (!s) return;
-    if (Math.hypot(s.raw.x - s.last.x, s.raw.y - s.last.y) > 0.5) move(s.raw, true);
-    release(s);
-    if (raf) cancelAnimationFrame(raf);
-    flush();
-    const { endLen } = getTaperLengths(s, s.last.pen);
-    if (endLen > 0) {
-      redrawStroke(s, s.distance);
-      flush();
-    }
-    const dctx = o.destination.getContext("2d");
-
-    const b = s.all;
-    if (dctx && b) {
-      const lum = on("luminanceBlending");
-      if (!lum && str("blendMode") === "Subtract") {
-        const x0 = Math.max(0, Math.floor(b.x0)), y0 = Math.max(0, Math.floor(b.y0));
-        const w = Math.min(cw, Math.ceil(b.x1)) - x0, h = Math.min(ch, Math.ceil(b.y1)) - y0;
-        if (w > 0 && h > 0) {
-          const a = dctx.getImageData(x0, y0, w, h), l = lctx.getImageData(x0, y0, w, h);
-          for (let k = 0; k < a.data.length; k += 4) {
-            const f = ((l.data[k + 3] ?? 0) / 255) * s.opacity;
-            for (let j = 0; j < 3; j++) a.data[k + j] = Math.max(0, (a.data[k + j] ?? 0) - (l.data[k + j] ?? 0) * f);
-          }
-          dctx.putImageData(a, x0, y0);
-        }
-      } else {
-        dctx.save();
-        dctx.globalAlpha = s.opacity;
-        dctx.globalCompositeOperation = lum ? "luminosity" : blendOf(str("blendMode"))[0];
-        dctx.drawImage(o.layer, 0, 0);
-        dctx.restore();
-      }
-    }
-    lctx.clearRect(0, 0, cw, ch);
     stroke = null;
+
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+
+    const box = s.all ?? { x0: 0, y0: 0, x1: cw, y1: ch };
+    const bw = box.x1 - box.x0, bh = box.y1 - box.y0;
+    if (bw <= 0 || bh <= 0) return;
+
+    if (s.maxMode) {
+      lctx.clearRect(box.x0, box.y0, bw, bh);
+      lctx.save();
+      lctx.drawImage(mcan, box.x0, box.y0, bw, bh, box.x0, box.y0, bw, bh);
+      lctx.globalCompositeOperation = "source-in";
+      lctx.fillStyle = s.rgbStr;
+      lctx.fillRect(box.x0, box.y0, bw, bh);
+      lctx.restore();
+    }
+
+    dctx.save();
+    dctx.globalAlpha = s.opacity;
+    dctx.globalCompositeOperation = on("luminanceBlending")
+      ? "luminosity"
+      : (BLEND_OPS[str("blendMode")] ?? "source-over");
+    dctx.drawImage(layer, box.x0, box.y0, bw, bh, box.x0, box.y0, bw, bh);
+    dctx.restore();
+
+    lctx.clearRect(box.x0, box.y0, bw, bh);
+    layer.style.opacity = "1";
+    layer.style.mixBlendMode = "normal";
   };
 
   const cancel = () => {
-    if (raf) cancelAnimationFrame(raf);
-    raf = 0;
-    lctx.clearRect(0, 0, o.layer.width, o.layer.height);
+    if (!stroke) return;
     stroke = null;
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+    lctx.clearRect(0, 0, cw, ch);
+    layer.style.opacity = "1";
+    layer.style.mixBlendMode = "normal";
   };
 
-  return { begin, move: (input: BrushInput) => move(input), end, cancel, active: () => stroke !== null };
+  return { begin, move, end, cancel };
 }
-export type StrokeEngine = ReturnType<typeof createStrokeEngine>;
 
-/** Draws a brush's preview stroke using its Preview settings. */
-export function renderBrushPreview(target: HTMLCanvasElement, settings: BrushSettings | undefined, sources: BrushSources, color: string, sizeScale = 1) {
-  const ctx = target.getContext("2d");
-  if (!ctx) return;
-  const w = target.width, h = target.height;
+/** Previews a brush stroke onto an arbitrary canvas element. */
+export function renderBrushPreview(
+  canvas: HTMLCanvasElement,
+  settings: BrushSettings,
+  color = "#000000",
+  sources?: BrushSources
+) {
+  const w = canvas.width, h = canvas.height;
+  const ctx = canvas.getContext("2d")!;
   ctx.clearRect(0, 0, w, h);
-  const s = withDefaults(settings);
-  const num = (id: string) => { const v = s[id]; return typeof v === "number" ? v : 0; };
-  const layer = document.createElement("canvas");
-  layer.width = w; layer.height = h;
-  const dpr = window.devicePixelRatio || 1;
+
+  const off = document.createElement("canvas");
+  off.width = w; off.height = h;
+
   const engine = createStrokeEngine({
-    destination: target, layer, pixelRatio: () => dpr, color: () => color, settings: () => s, sources: () => sources,
-    size: () => num("previewSize"), sizeScale: () => sizeScale, wetMix: s["wetMix"] !== false && s["previewWetMix"] === true, fast: true,
+    destination: canvas,
+    layer: off,
+    pixelRatio: () => 1,
+    color: () => color,
+    settings: () => settings,
+    sources: () => sources ?? { shape: activeBrush.shape, grain: activeBrush.grain },
+    fast: true,
   });
-  const pMin = clamp(num("previewPressureMin") / 100), pScale = num("previewPressureScale") / 100;
-  const tilt = clamp(Math.abs(num("previewTilt")) / 100);
-  const point = (x: number, y: number, pressure: number, time: number): BrushInput => ({ x, y, pressure: clamp(pressure), tilt, azimuth: 0, twist: 0, pen: true, time });
-  if (s["previewStamp"] === true) {
-    engine.begin(point(w / 2, h / 2, 1, 0));
-    engine.end();
-    return;
-  }
-  const pad = h * 0.6, steps = 60;
-  for (let i = 0; i <= steps; i++) {
+
+  const pts: Pt[] = [
+    { x: w * 0.1, y: h * 0.5 },
+    { x: w * 0.35, y: h * 0.25 },
+    { x: w * 0.65, y: h * 0.75 },
+    { x: w * 0.9, y: h * 0.5 },
+  ];
+
+  engine.begin({ x: pts[0]!.x, y: pts[0]!.y, pressure: 0.3, tilt: 0, azimuth: 0, twist: 0, pen: true, time: 0 });
+  const steps = 40;
+  for (let i = 1; i <= steps; i++) {
     const t = i / steps;
-    const p = point(pad + t * (w - pad * 2), h / 2 - Math.sin(t * Math.PI * 2) * h * 0.18, pMin + (1 - pMin) * Math.sin(t * Math.PI) * pScale, i * 16);
-    if (i === 0) engine.begin(p);
-    else engine.move(p);
+    const p0 = pts[0]!, p1 = pts[1]!, p2 = pts[2]!, p3 = pts[3]!;
+    const cx = (1 - t) ** 3 * p0.x + 3 * (1 - t) ** 2 * t * p1.x + 3 * (1 - t) * t ** 2 * p2.x + t ** 3 * p3.x;
+    const cy = (1 - t) ** 3 * p0.y + 3 * (1 - t) ** 2 * t * p1.y + 3 * (1 - t) * t ** 2 * p2.y + t ** 3 * p3.y;
+    const pr = 0.3 + 0.7 * Math.sin(t * Math.PI);
+    engine.move({ x: cx, y: cy, pressure: pr, tilt: 0, azimuth: 0, twist: 0, pen: true, time: i * 16 });
   }
   engine.end();
 }
