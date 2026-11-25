@@ -36,6 +36,7 @@ export class BrushRenderer {
   private tipCtx: CanvasRenderingContext2D;
   private offset: { x: number; y: number };
   private grainSource: PixelMap | null;
+  private whiteTip = false;
   constructor(private destination: HTMLCanvasElement, private layer: HTMLCanvasElement, options: RenderOptions) {
     const ctx = layer.getContext('2d');
     if (!ctx) throw new Error('Canvas drawing is unavailable');
@@ -64,6 +65,7 @@ export class BrushRenderer {
     if (!pc || !tc) throw new Error('Canvas drawing is unavailable');
     this.paintCtx = pc; this.tipCtx = tc;
     this.baseSeed = this.seed;
+    this.whiteTip = /shape-(14|16|17|18|31)\.png/.test(JSON.stringify(this.s) + JSON.stringify(activeBrush.settings ?? {}));
   }
   private n(id: string) { return numberSetting(this.s, id); }
   private on(id: string) { return this.s[id] === true; }
@@ -194,7 +196,7 @@ export class BrushRenderer {
         const rgb = hslToRgb(...color), tc = this.tipCtx, res = this.tipWork.width;
         tc.clearRect(0, 0, res, res); tc.globalCompositeOperation = 'source-over'; tc.globalAlpha = 1;
         tc.drawImage(this.tip, 0, 0); tc.globalCompositeOperation = 'source-in';
-        tc.fillStyle = `rgb(${rgb.join(',')})`; tc.fillRect(0, 0, res, res); { const tipSrc = String((this.tip as unknown as { src?: string }).src ?? ''); if (/shape-1[4678]\.png/.test(tipSrc)) { const core = whiteCore(this.tip as unknown as CanvasImageSource & { width: number; height: number }); tc.globalCompositeOperation = 'source-over'; tc.drawImage(core, 0, 0); } }
+        tc.fillStyle = `rgb(${rgb.join(',')})`; tc.fillRect(0, 0, res, res); { if (this.whiteTip) { const core = whiteCore(this.tip as unknown as CanvasImageSource & { width: number; height: number }); tc.globalCompositeOperation = 'source-over'; tc.drawImage(core, 0, 0); } }
         if (this.grain && this.str('grainMode') === 'Moving') {
           const depth = Math.max(this.n('grainDepthMin'), this.n('grainDepth') - this.random() * this.n('grainDepthJitter')) / 100;
           const gc = buildGrainCanvas(this.s, depth, this.grainSource);
