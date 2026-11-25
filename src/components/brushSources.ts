@@ -1,3 +1,9 @@
+import shape7Asset from "@/assets/shapes/shape-7.png.asset.json";
+import shape8Asset from "@/assets/shapes/shape-8.png.asset.json";
+import shape9Asset from "@/assets/shapes/shape-9.png.asset.json";
+import shape10Asset from "@/assets/shapes/shape-10.png.asset.json";
+import shape11Asset from "@/assets/shapes/shape-11.png.asset.json";
+import shape12Asset from "@/assets/shapes/shape-12.png.asset.json";
 import shape1Asset from "@/assets/shapes/shape-1.png.asset.json";
 import shape2Asset from "@/assets/shapes/shape-2.png.asset.json";
 import shape3Asset from "@/assets/shapes/shape-3.png.asset.json";
@@ -17,13 +23,18 @@ export type BrushSourceOption = {
 };
 
 export const SHAPE_SOURCES: BrushSourceOption[] = [
-  { kind: "Shape", name: "Graphite Contact Tip", image: pencilTip, index: 0 },
   { kind: "Shape", name: "Felt tip pen (hard)", image: shape1Asset.url, index: 1 },
   { kind: "Shape", name: "Pen (digital)", image: shape2Asset.url, index: 2 },
   { kind: "Shape", name: "Pen (bleed)", image: shape3Asset.url, index: 3 },
   { kind: "Shape", name: "Pen (fade)", image: shape4Asset.url, index: 4 },
   { kind: "Shape", name: "Air (normal)", image: shape5Asset.url, index: 5 },
   { kind: "Shape", name: "Air (triangle)", image: shape6Asset.url, index: 6 },
+  { kind: "Shape", name: "Air (Trapezoid 20%)", image: shape7Asset.url, index: 7 },
+  { kind: "Shape", name: "Air (Trapezoid 40%)", image: shape8Asset.url, index: 8 },
+  { kind: "Shape", name: "Air (Trapezoid 60%)", image: shape9Asset.url, index: 9 },
+  { kind: "Shape", name: "Air (Trapezoid 80%)", image: shape10Asset.url, index: 10 },
+  { kind: "Shape", name: "Air (Particle)", image: shape11Asset.url, index: 11 },
+  { kind: "Shape", name: "Air (Particle L)", image: shape12Asset.url, index: 12 },
 ];
 
 export const GRAIN_SOURCES: BrushSourceOption[] = [

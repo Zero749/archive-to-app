@@ -605,3 +605,8 @@ aside > div:has(.glass-slider) {
   .studio-import-popover { right: 3%; }
 }
 
+
+/* Shape library previews: show black shape images as white */
+img[src*="/shape-"] {
+  filter: invert(1);
+}
