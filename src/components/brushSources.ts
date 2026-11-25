@@ -76,6 +76,7 @@ export const SHAPE_SOURCES: BrushSourceOption[] = [
 ];
 
 export const GRAIN_SOURCES: BrushSourceOption[] = [
+  { kind: "Grain", name: "No grain", image: "", index: 0 },
   { kind: "Grain", name: "Graphite Micrograin", image: pencilGrain, index: 0 },
 ];
 

@@ -28,7 +28,8 @@ import {
 import { activeBrush, parseArchive, selectBrush, stripExt, uid, type Brush, type Library } from "./brushImport";
 import { BrushStrokePreview } from "./BrushStrokePreview";
 import { BrushStudio } from "./BrushStudio";
-import { STARTER_PENCIL } from "./brushSources";
+import { STARTER_PENCIL, SHAPE_SOURCES } from "./brushSources";
+import { withDefaults as newBrushDefaults } from "./brushImport";
 
 const CATEGORIES: { name: string; icon: LucideIcon }[] = [
   { name: "Recent", icon: Hourglass },
@@ -189,6 +190,23 @@ export const BrushLibraryMenu = forwardRef<HTMLDivElement, { anchorX: number }>(
       setStore(s);
     };
 
+    const createBrush = () => {
+      setPlusOpen(false);
+      const nb = { id: uid(), name: "New brush", shape: SHAPE_SOURCES[0]?.image, grain: undefined, settings: { ...newBrushDefaults({}), grainDepth: 0, grainDepthMin: 0 } };
+      const s = {
+        ...store,
+        libs: store.libs.map((l) => {
+          if (l.id !== store.current) return l;
+          const target = l.sets.some((x) => x.id === selectedSet) ? selectedSet : l.sets[0]?.id;
+          if (!target) return { ...l, sets: [{ id: uid(), name: "My brushes", brushes: [nb] }] };
+          return { ...l, sets: l.sets.map((x) => (x.id === target ? { ...x, brushes: [...x.brushes, nb] } : x)) };
+        }),
+      };
+      update(s);
+      setSelectedBrush(nb.id);
+      setSettingsOpen(true);
+    };
+
     const startImport = () => {
       setPlusOpen(false);
       fileRef.current?.click();
@@ -310,7 +328,7 @@ export const BrushLibraryMenu = forwardRef<HTMLDivElement, { anchorX: number }>(
                 <button
                   key={label}
                   type="button"
-                  onClick={label === "Import from Files" ? startImport : undefined}
+                  onClick={label === "Import from Files" ? startImport : label === "Create new brush" ? createBrush : undefined}
                   className="flex w-full items-center justify-between border-b border-menu-divider px-[1.2vw] py-[0.9vw] text-left text-[1.1vw] last:border-b-0 active:text-menu-active"
                 >
                   {label}
