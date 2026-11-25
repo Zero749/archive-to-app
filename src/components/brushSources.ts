@@ -1,3 +1,4 @@
+import shape25Asset from "@/assets/shapes/shape-25.png.asset.json";
 import shape19Asset from "@/assets/shapes/shape-19.png.asset.json";
 import shape20Asset from "@/assets/shapes/shape-20.png.asset.json";
 import shape21Asset from "@/assets/shapes/shape-21.png.asset.json";
@@ -53,12 +54,13 @@ export const SHAPE_SOURCES: BrushSourceOption[] = [
   { kind: "Shape", name: "Outline 1", image: shape16Asset.url, index: 16 },
   { kind: "Shape", name: "Outline 2", image: shape17Asset.url, index: 17 },
   { kind: "Shape", name: "Outline 3", image: shape18Asset.url, index: 18 },
-  { kind: "Shape", name: "Dot", image: shape19Asset.url, index: 19 },
-  { kind: "Shape", name: "Pencil", image: shape20Asset.url, index: 20 },
-  { kind: "Shape", name: "Pencil (Graphite)", image: shape21Asset.url, index: 21 },
-  { kind: "Shape", name: "Watercolor (Bleed)", image: shape22Asset.url, index: 22 },
-  { kind: "Shape", name: "Watercolor (Point)", image: shape23Asset.url, index: 23 },
-  { kind: "Shape", name: "Watercolor (Real)", image: shape24Asset.url, index: 24 },
+  { kind: "Shape", name: "Dot", image: shape25Asset.url, index: 25 },
+  { kind: "Shape", name: "Pencil", image: shape19Asset.url, index: 19 },
+  { kind: "Shape", name: "Pencil (Graphite)", image: shape20Asset.url, index: 20 },
+  { kind: "Shape", name: "Watercolor (Bleed)", image: shape21Asset.url, index: 21 },
+  { kind: "Shape", name: "Watercolor (Point)", image: shape22Asset.url, index: 22 },
+  { kind: "Shape", name: "Watercolor (Real)", image: shape23Asset.url, index: 23 },
+  { kind: "Shape", name: "Oil (Rough)", image: shape24Asset.url, index: 24 },
 ];
 
 export const GRAIN_SOURCES: BrushSourceOption[] = [
