@@ -632,3 +632,7 @@ img[src*="/shape-"] {
 .studio-source-library .studio-source-grid .studio-source-tile img {
   object-fit: contain;
 }
+.studio-source-library .studio-source-grid { align-content: start; align-items: start; grid-auto-rows: max-content; }
+.studio-source-library .studio-source-grid .studio-source-item { height: auto !important; }
+.studio-source-library .studio-source-grid .studio-source-tile { width: 100% !important; height: auto !important; aspect-ratio: 1 / 1 !important; flex: none !important; }
+.studio-source-library .studio-source-grid .studio-source-tile img { position: absolute !important; inset: 0 !important; width: 100% !important; height: 100% !important; object-fit: contain !important; }

@@ -194,7 +194,7 @@ export class BrushRenderer {
         const rgb = hslToRgb(...color), tc = this.tipCtx, res = this.tipWork.width;
         tc.clearRect(0, 0, res, res); tc.globalCompositeOperation = 'source-over'; tc.globalAlpha = 1;
         tc.drawImage(this.tip, 0, 0); tc.globalCompositeOperation = 'source-in';
-        tc.fillStyle = `rgb(${rgb.join(',')})`; tc.fillRect(0, 0, res, res);
+        tc.fillStyle = `rgb(${rgb.join(',')})`; tc.fillRect(0, 0, res, res); { const tipSrc = String((this.tip as unknown as { src?: string }).src ?? ''); if (/shape-1[4678]\.png/.test(tipSrc)) { const core = whiteCore(this.tip as unknown as CanvasImageSource & { width: number; height: number }); tc.globalCompositeOperation = 'source-over'; tc.drawImage(core, 0, 0); } }
         if (this.grain && this.str('grainMode') === 'Moving') {
           const depth = Math.max(this.n('grainDepthMin'), this.n('grainDepth') - this.random() * this.n('grainDepthJitter')) / 100;
           const gc = buildGrainCanvas(this.s, depth, this.grainSource);
@@ -276,4 +276,14 @@ export class BrushRenderer {
     this.ctx.clearRect(0, 0, this.layer.width, this.layer.height);
   }
   cancel() { if (this.frame) cancelAnimationFrame(this.frame); this.frame = 0; this.ctx.clearRect(0, 0, this.layer.width, this.layer.height); }
+}
+
+const coreCache = new WeakMap<object, HTMLCanvasElement>();
+function whiteCore(tip: CanvasImageSource & { width: number; height: number }) {
+  const hit = coreCache.get(tip); if (hit) return hit;
+  const c = document.createElement('canvas'); c.width = tip.width; c.height = tip.height;
+  const x = c.getContext('2d'); if (!x) return c;
+  x.drawImage(tip, 0, 0); const d = x.getImageData(0, 0, c.width, c.height); const p = d.data;
+  for (let i = 0; i < p.length; i += 4) { const a = p[i + 3] ?? 0; const k = a > 200 ? Math.min(1, (a - 200) / 40) : 0; p[i] = 255; p[i + 1] = 255; p[i + 2] = 255; p[i + 3] = Math.round(255 * k); }
+  x.putImageData(d, 0, 0); coreCache.set(tip, c); return c;
 }
