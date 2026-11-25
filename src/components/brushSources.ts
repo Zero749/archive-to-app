@@ -1,3 +1,9 @@
+import shape13Asset from "@/assets/shapes/shape-13.png.asset.json";
+import shape14Asset from "@/assets/shapes/shape-14.png.asset.json";
+import shape15Asset from "@/assets/shapes/shape-15.png.asset.json";
+import shape16Asset from "@/assets/shapes/shape-16.png.asset.json";
+import shape17Asset from "@/assets/shapes/shape-17.png.asset.json";
+import shape18Asset from "@/assets/shapes/shape-18.png.asset.json";
 import shape7Asset from "@/assets/shapes/shape-7.png.asset.json";
 import shape8Asset from "@/assets/shapes/shape-8.png.asset.json";
 import shape9Asset from "@/assets/shapes/shape-9.png.asset.json";
@@ -35,6 +41,12 @@ export const SHAPE_SOURCES: BrushSourceOption[] = [
   { kind: "Shape", name: "Air (Trapezoid 80%)", image: shape10Asset.url, index: 10 },
   { kind: "Shape", name: "Air (Particle)", image: shape11Asset.url, index: 11 },
   { kind: "Shape", name: "Air (Particle L)", image: shape12Asset.url, index: 12 },
+  { kind: "Shape", name: "Mottled", image: shape13Asset.url, index: 13 },
+  { kind: "Shape", name: "Neon 1", image: shape14Asset.url, index: 14 },
+  { kind: "Shape", name: "Neon 2", image: shape15Asset.url, index: 15 },
+  { kind: "Shape", name: "Outline 1", image: shape16Asset.url, index: 16 },
+  { kind: "Shape", name: "Outline 2", image: shape17Asset.url, index: 17 },
+  { kind: "Shape", name: "Outline 3", image: shape18Asset.url, index: 18 },
 ];
 
 export const GRAIN_SOURCES: BrushSourceOption[] = [

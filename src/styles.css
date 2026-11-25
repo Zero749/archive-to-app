@@ -610,3 +610,25 @@ aside > div:has(.glass-slider) {
 img[src*="/shape-"] {
   filter: invert(1);
 }
+
+/* Source Library: square tiles, vertical scroll with hidden scrollbar */
+.studio-source-library .studio-source-grid {
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  max-height: 100%;
+  flex: 1 1 auto;
+  align-content: start;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.studio-source-library .studio-source-grid::-webkit-scrollbar {
+  display: none;
+}
+.studio-source-library .studio-source-grid .studio-source-tile {
+  aspect-ratio: 1 / 1;
+  height: auto;
+}
+.studio-source-library .studio-source-grid .studio-source-tile img {
+  object-fit: contain;
+}
