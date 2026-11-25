@@ -133,7 +133,7 @@ export function BrushStudio({ brush, onClose, onSave }: { brush: Brush; onClose:
     return { ...d, settings: next };
   });
   const replaceSettings = (next: BrushSettings) => { setActiveSettings(next); setDraft(d => ({ ...d, settings: { ...next } })); };
-  const setPicture = (type: string, url: string) => setDraft(d => { const next = type === "Shape" ? { ...d, shape: url } : url ? { ...d, grain: url, settings: { ...withDefaults(d.settings), grainDepth: Number(withDefaults(d.settings)["grainDepth"]) > 0 ? withDefaults(d.settings)["grainDepth"] : 100 } } : { ...d, grain: undefined, settings: { ...withDefaults(d.settings), grainDepth: 0, grainDepthMin: 0 } }; void selectBrush(next); return next; });
+  const setPicture = (type: string, url: string) => setDraft(d => { const next = type === "Shape" ? { ...d, shape: url } : url ? { ...d, grain: url, settings: { ...withDefaults(d.settings), grainDepth: Number(withDefaults(d.settings)["grainDepth"]) > 0 ? Number(withDefaults(d.settings)["grainDepth"]) : 100 } } : { ...d, grain: undefined, settings: { ...withDefaults(d.settings), grainDepth: 0, grainDepthMin: 0 } }; void selectBrush(next); return next; });
   const cancel = () => { void selectBrush(brush); onClose(); };
   const done = () => { onSave(draft); onClose(); };
   const [page, setPage] = useState("Stroke path");
