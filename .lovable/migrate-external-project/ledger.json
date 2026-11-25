@@ -1,0 +1,79 @@
+[
+  {
+    "capability": "code",
+    "source": "project-migration-hub-main.zip (TanStack Start, same Lovable template)",
+    "outcome": "migrated; fixed a missing brush import that broke the typecheck",
+    "status": "done",
+    "next_action": "none"
+  },
+  {
+    "capability": "design and assets",
+    "source": "src/styles.css, src/assets/*.asset.json",
+    "outcome": "styles migrated; 4 Brush Studio images are stored under the old project and cannot be copied",
+    "status": "blocked",
+    "next_action": "user attaches the 4 images, then re-upload them as assets for this project"
+  },
+  {
+    "capability": "dependencies",
+    "source": "package.json (adds fflate)",
+    "outcome": "fflate added",
+    "status": "done",
+    "next_action": "none"
+  },
+  {
+    "capability": "schema",
+    "source": "none detected",
+    "outcome": "not applicable",
+    "status": "accepted",
+    "next_action": "none"
+  },
+  {
+    "capability": "records",
+    "source": "none detected",
+    "outcome": "not applicable",
+    "status": "accepted",
+    "next_action": "none"
+  },
+  {
+    "capability": "auth identities / authorization",
+    "source": "none detected",
+    "outcome": "not applicable",
+    "status": "accepted",
+    "next_action": "none"
+  },
+  {
+    "capability": "storage / uploaded files",
+    "source": "none detected (drawings are in-browser only)",
+    "outcome": "not applicable",
+    "status": "accepted",
+    "next_action": "none"
+  },
+  {
+    "capability": "external providers / secrets",
+    "source": "no environment variables or provider SDKs",
+    "outcome": "not applicable",
+    "status": "accepted",
+    "next_action": "none"
+  },
+  {
+    "capability": "public endpoints / webhooks / schedules",
+    "source": "none detected",
+    "outcome": "not applicable",
+    "status": "accepted",
+    "next_action": "none"
+  },
+  {
+    "capability": "cutover",
+    "source": "old project",
+    "outcome": "user publishes this project when ready",
+    "status": "accepted",
+    "next_action": "none"
+  },
+  {
+    "capability": "verification",
+    "source": "-",
+    "outcome": "typecheck clean, tests pass, canvas loads with no errors on tablet and phone sizes, brush menu opens, brush stroke draws",
+    "status": "verified",
+    "next_action": "none"
+  }
+]

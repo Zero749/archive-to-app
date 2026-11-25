@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <filter id="tooth-edge" x="-10%" y="-10%" width="120%" height="120%">
+      <feTurbulence type="fractalNoise" baseFrequency=".18" numOctaves="2" seed="12" result="edge-noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="edge-noise" scale="8" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <radialGradient id="graphite" cx="48%" cy="44%" r="62%">
+      <stop offset="0" stop-color="#000" stop-opacity=".98"/>
+      <stop offset=".58" stop-color="#000" stop-opacity=".94"/>
+      <stop offset=".86" stop-color="#000" stop-opacity=".68"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <path filter="url(#tooth-edge)" fill="url(#graphite)" d="M5 63l12-5 8-9 14-2 9-10 14 3 10-8 12 5 13 1 6 9 12 6 6 11-10 6-9 9-14 1-12 8-12-5-13 9-9-10-14-2-6-8-12-1Z"/>
+</svg>

@@ -1,0 +1,21 @@
+Brush source asset attribution
+
+Pencil tip mask
+Adapted from "The graphite core" by Kiran Vati K:
+https://commons.wikimedia.org/wiki/File:The_graphite_core.jpg
+Licensed under Creative Commons Attribution 4.0 International:
+https://creativecommons.org/licenses/by/4.0/
+The photograph was simplified into a soft, rounded vector contact-tip mask.
+
+Graphite grain
+"graphite-micrograin.svg" is a tileable fractal-noise texture generated for
+this brush; it does not use a photographed or drawn scribble texture.
+
+Pencil brush settings
+"mypaint-pencil.myb" is the classic Pencil preset from MyPaint brushes by
+Martin Renold and the MyPaint Development Team:
+https://github.com/mypaint/mypaint-brushes/tree/master/brushes/classic
+The brush settings are released under CC0 1.0:
+https://creativecommons.org/publicdomain/zero/1.0/
+The built-in Pencil adapts its spacing, opacity, and pressure behavior to this
+app's brush renderer.

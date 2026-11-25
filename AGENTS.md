@@ -28,3 +28,8 @@ use the editor.
   own key and store it in Secrets.
 - **Secrets.** Lovable manages them. Do not put secret values in the repo.
 <!-- LOVABLE:END -->
+
+- Render Brush Studio through a body portal so glass-menu ancestors cannot constrain its fullscreen positioning.
+- Brush Studio edits a draft copy of the selected brush, applies it live to the drawing engine, and saves to the library only on Done (Cancel restores the original).
+- Use one brush renderer for the canvas, drawing pad, and library previews so settings have the same meaning everywhere.
+- Canvas brush exports use a versioned ZIP manifest with embedded sources and settings; do not claim compatibility with Procreate's proprietary writer.
