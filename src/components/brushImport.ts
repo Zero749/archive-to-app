@@ -1,8 +1,10 @@
 import { unzipSync } from "fflate";
 import { blendValue, grainScale } from "./brushBehavior";
+import { ProcreateBrushRenderer, type BrushInput, type BrushTool, type RenderOptions } from "./brushEngine";
 
 import { DEFAULT_BRUSH_SETTINGS, STUDIO_PAGES, type BrushSettings } from "./brushStudioData";
 export { DEFAULT_BRUSH_SETTINGS, type BrushSettings } from "./brushStudioData";
+export { ProcreateBrushRenderer, type BrushInput, type BrushTool, type RenderOptions };
 
 export type Brush = {
   id: string;
