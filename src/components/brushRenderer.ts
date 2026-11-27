@@ -196,7 +196,7 @@ export class BrushRenderer {
         const rgb = hslToRgb(...color), tc = this.tipCtx, res = this.tipWork.width;
         tc.clearRect(0, 0, res, res); tc.globalCompositeOperation = 'source-over'; tc.globalAlpha = 1;
         tc.drawImage(this.tip, 0, 0); tc.globalCompositeOperation = 'source-in';
-        tc.fillStyle = `rgb(${rgb.join(',')})`; tc.fillRect(0, 0, res, res); { if (this.whiteTip) { const core = whiteCore(this.tip as unknown as CanvasImageSource & { width: number; height: number }); tc.globalCompositeOperation = 'source-over'; tc.drawImage(core, 0, 0); } }
+        tc.fillStyle = `rgb(${rgb.join(',')})`; { if (this.whiteTip) { const core = whiteCore(this.tip as unknown as CanvasImageSource & { width: number; height: number }); tc.globalCompositeOperation = 'source-over'; tc.drawImage(core, 0, 0); } }
         if (this.grain && this.str('grainMode') === 'Moving') {
           const depth = Math.max(this.n('grainDepthMin'), this.n('grainDepth') - this.random() * this.n('grainDepthJitter')) / 100;
           const gc = buildGrainCanvas(this.s, depth, this.grainSource);
