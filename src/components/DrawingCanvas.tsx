@@ -9,7 +9,8 @@ import {
   buildGrainCanvas,
   grainTransform,
 } from "./brushImport";
-import { createStrokeEngine, readPointer } from "./strokeEngine";
+import { ProcreateBrushRenderer, type BrushInput, type BrushTool, type RenderOptions } from "./brushEngine";
+import { getBrushRendererFactory } from "./brushRenderer";
 
 /** Tip size (screen points) at 100% Maximum size and full Brush size. */
 const MAX_TIP_PX = 80;
@@ -863,61 +864,89 @@ export const DrawingCanvas = forwardRef<HTMLCanvasElement, Props>(
         cb.current.onStrokeCancel();
       };
 
-      const strokeEngine = createStrokeEngine({
-        destination: canvas,
-        layer,
-        pixelRatio: () => dpr,
-        color: () => cb.current.currentColor,
-        settings: () => activeSettingsRef.current,
-        sources: () => ({ shape: activeBrush.shape, grain: activeBrush.grain }),
-        size: () => cb.current.brushSize,
-        opacity: () => cb.current.brushOpacity,
-        viewRotation: () => view.r,
-      });
-      
       let enginePointerId: number | null = null;
+      let renderer: ProcreateBrushRenderer | null = null;
+      let lastInput: BrushInput | null = null;
+
       const beginEngineStroke = (id: number, p: Pt, e: PointerEvent) => {
         const c = toCanvas(p);
         cb.current.onStrokeStart();
         try {
-          strokeEngine.begin(readPointer(e, c.x, c.y));
+          const input: BrushInput = {
+            x: c.x,
+            y: c.y,
+            pressure: e.pressure || 0.5,
+            tilt: e.tilt || 0,
+            azimuth: e.azimuth || 0,
+            twist: e.twist || 0,
+            pen: e.pointerType === 'pen' || e.pointerType === 'touch',
+            time: Date.now(),
+          };
+
+          if (!renderer) {
+            renderer = new ProcreateBrushRenderer(
+              canvas,
+              layer,
+              {
+                color: cb.current.currentColor,
+                size: cb.current.brushSize,
+                opacity: cb.current.brushOpacity,
+                pixelRatio: dpr,
+                tool: 'paint',
+                preview: false,
+                settings: activeSettingsRef.current,
+                sources: { shape: activeBrush.shape, grain: activeBrush.grain },
+              }
+            );
+          }
+
+          renderer.start(input);
           enginePointerId = id;
         } catch (error) {
           cb.current.onStrokeCancel();
           throw error;
         }
       };
+
       const moveEngineStroke = (id: number, p: Pt, e: PointerEvent) => {
-        if (enginePointerId !== id) return;
-        // Use every sample the pen reported since the last frame for smooth curves.
-        const list = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [];
-        const events = list.length ? list : [e];
-        let lx = NaN, ly = NaN;
-        for (let i = 0; i < events.length; i++) {
-          const ce = events[i]!;
-          // Skip samples too close together (keeps the last one) to avoid lag.
-          if (i < events.length - 1 && Math.abs(ce.clientX - lx) + Math.abs(ce.clientY - ly) < 3) continue;
-          lx = ce.clientX; ly = ce.clientY;
-          const c = toCanvas({ x: p.x + (ce.clientX - e.clientX), y: p.y + (ce.clientY - e.clientY) });
-          strokeEngine.move(readPointer(ce, c.x, c.y));
+        if (enginePointerId !== id || !renderer) return;
+
+        try {
+          const input: BrushInput = {
+            x: toCanvas(p).x,
+            y: toCanvas(p).y,
+            pressure: e.pressure || 0.5,
+            tilt: e.tilt || 0,
+            azimuth: e.azimuth || 0,
+            twist: e.twist || 0,
+            pen: e.pointerType === 'pen' || e.pointerType === 'touch',
+            time: Date.now(),
+          };
+
+          renderer.move(input);
+        } catch (error) {
+          cb.current.onStrokeCancel();
+          throw error;
         }
       };
+
       const endEngineStroke = () => {
-        if (enginePointerId === null) return;
+        if (enginePointerId === null || !renderer) return;
         enginePointerId = null;
         try {
-          strokeEngine.end();
+          renderer.end();
         } catch (error) {
-          strokeEngine.cancel();
+          renderer.cancel();
           cb.current.onStrokeCancel();
           throw error;
         }
         cb.current.onStrokeEnd();
       };
+
       const cancelEngineStroke = () => {
-        if (enginePointerId === null) return;
+        if (enginePointerId === null || !renderer) return;
         enginePointerId = null;
-        strokeEngine.cancel();
+        renderer.cancel();
         cb.current.onStrokeCancel();
       };
 
@@ -1134,6 +1163,7 @@ export const DrawingCanvas = forwardRef<HTMLCanvasElement, Props>(
       return () => {
         cancelAnimationFrame(settledFrame);
         resizeObserver.disconnect();
+        renderer?.cancel();
         wrap.removeEventListener("pointerdown", onDown);
         wrap.removeEventListener("pointermove", onMove);
         wrap.removeEventListener("pointerup", onUp);
